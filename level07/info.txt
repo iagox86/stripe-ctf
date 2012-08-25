@@ -1,0 +1,97 @@
+** Description **
+
+I'm gonna summarize wtf we're doing here, because I have no idea how to
+proceed...
+
+First of all, we're trying to do a sha1 hash extension attack against
+some "waffle ordering" code. The goal is to add a new argument to the
+list of args and have a signature verify. The args are in POSTDATA and
+the signature looks like "a=b&c=d|sig:<signature>"
+
+The signature code is verified as such:
+    def verify_signature(user_id, sig, raw_params):
+        h = hashlib.sha1()
+        h.update(secret + raw_params)
+        if h.hexdigest() != sig:
+            raise BadSignature('signature does not match')
+        return True
+
+Where 'secret' is always 14 characters long, alphanumeric. Let's look at
+an example...
+
+
+** Good request **
+
+This is what the POSTDATA looks like for good request:
+count=1&lat=90&user_id=5&long=49&waffle=liege|sig:0197579237c44bb4ea60443959095cb361e2725f
+
+The secret used to calculate that is "ivtAUQRQ6dFmH9", so the operation
+was:
+sig = SHA1("ivtAUQRQ6dFmH9count=1&lat=90&user_id=5&long=49&waffle=liege")
+
+$ echo -n "ivtAUQRQ6dFmH9count=1&lat=90&user_id=5&long=49&waffle=liege" | sha1sum  
+0197579237c44bb4ea60443959095cb361e2725f  -
+
+And we can do the request (feel free to do as many requests as you want):
+$ curl -X POST -d "count=1&lat=90&user_id=5&long=49&waffle=liege|sig:0197579237c44bb4ea60443959095cb361e2725f" https://level07-2.stripe-ctf.com/user-khqqbglfcj/orders    
+{"error": "that waffle requires a premium subscription"}
+
+Our goal is to order a 'liege' waffle with the user_id of 1. We can do a
+replay attack to order other kinds of waffles for user_id 1:
+curl -X POST -d "count=2&lat=37.351&user_id=1&long=-119.827&waffle=chicken|sig:e8c57bb7cbb6fa98d116ed06622d6000ee431d49" https://level07-2.stripe-ctf.com/user-khqqbglfcj/orders
+
+But we want to append the "&waffle=liege" argument to order a liege
+waffle on that user's behalf.
+
+
+** Our target **
+
+This is our target POSTDATA:
+count=2&lat=37.351&user_id=1&long=-119.827&waffle=chicken|sig:e8c57bb7cbb6fa98d116ed06622d6000ee431d49
+
+We need to add "&waffle=liege" to the end of that. The theory is that we
+can add a placeholder for the 14-byte signature:
+
+XXXXXXXXXXXXXXcount=2&lat=37.351&user_id=1&long=-119.827&waffle=chicken
+
+Split it into 64-byte blocks:
+block1 => XXXXXXXXXXXXXXcount=2&lat=37.351&user_id=1&long=-119.827&waffle=
+block2 => chicken
+
+Pad the last block with 0x80 0x00 0x00 0x00 .... followed by <length in bits>
+
+XXXXXXXXXXXXXXcount=2&lat=37.351&user_id=1&long=-119.827&waffle=
+chicken%60%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%02%38
+
+Then add our new data as another block:
+XXXXXXXXXXXXXXcount=2&lat=37.351&user_id=1&long=-119.827&waffle=
+chicken%60%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%02%38
+&waffle=liege
+
+SHA1 the first two blocks:
+
+SHA1Init(&c);
+SHA1Update(&c, "XXXXXXXXXXXXXXcount=2&lat=37.351&user_id=1&long=-119.827&waffle=", 64)
+SHA1Update(&c,"chicken\x60\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x38", 64);
+
+Update the internal state to what we had before:
+
+c.h0 = 0xe8c57bb7
+c.h1 = 0xcbb6fa98
+c.h2 = 0xd116ed06
+c.h3 = 0x622d6000
+c.h4 = 0xee431d49
+
+Then add the final piece of data and finalize:
+
+SHA1_Update(&c, "&waffle=liege", 13);
+SHA1_Final(buffer, &c);
+
+Then add that signature to the packet:
+POSTDATA =
+count=2&lat=37.351&user_id=1&long=-119.827&waffle=chicken%60%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%02%38&waffle=liege|sig=<newvalue>
+
+Sadly, it won't work! I must be missing something, I think my
+implementation has its kinks worked out...
+
+
